@@ -1,0 +1,22 @@
+# game files - bring your own
+*.mpq
+*.exe
+*.dll
+D2.LNG
+# builds and generated data
+build/
+*.obj
+*.exp
+*.lib
+*.bin
+*.tmp
+# saves, logs, user settings
+Save/
+*.d2s
+*.d2x
+*.key
+*.log
+*.dmp
+# backups
+*.bak*
+*.orig
