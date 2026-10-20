@@ -9,6 +9,7 @@ A single-player and LAN mod for Diablo II: Lord of Destruction 1.14d, loaded thr
 - A "Contains:" box beside the tooltip of any item that holds socketed items.
 - Lost nested items are recovered into the inventory, stash, cube or ground on load.
 - "Gold Find +N%" / "Magic Find +N%" boxes on the player and merc panels, drawn under tooltips.
+- Find Item and Find Potion for every class at base level 20, 0 mana (untested in game).
 
 See [CHANGELOG.md](CHANGELOG.md).
 

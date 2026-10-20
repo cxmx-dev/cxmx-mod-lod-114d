@@ -2,6 +2,8 @@
 
 ## 2026-10-20
 
+- **Find Item and Find Potion for every class.** Every character, Barbarians included, gets Barbarian Find Potion and Find Item at base level 20 on every game join (below 20 or missing goes to 20, above 20 is kept). Both cost 0 mana, and Find Item needs level 1. In LAN games the host must run this DLL.
+- **Untested in game:** both skills showing on all classes at level 20 with Mana Cost 0; Barbarians above 20 keeping their level; use on corpses by non-Barbarian classes, shapeshifted Druids and Assassins; LAN guests getting the skills without a crash.
 - **Jewel-in-jewel nesting, up to 7 deep.** Socketed jewels can hold socketed jewels. The whole chain now survives equip, unequip, moves between player and merc, save and reload. The save loader reads every level, and item copies keep the full chain. Set the cap with `NestMax` (default 7) in `cxmxdev.ini`.
 - **Startup loader fix.** The nested-item loader is ready before the first character loads, so a character or merc carrying nested items loads normally.
 - **Gold Find / Magic Find boxes.** The player and merc panels read "Gold Find +N%" and "Magic Find +N%". The boxes are drawn under item tooltips, so tooltips stay readable.

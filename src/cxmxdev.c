@@ -944,6 +944,7 @@ static int g_jon;
    are not saved in .d2s, so they are reapplied on every join; Paladin Charge (class skill) is saved at 20. */
 #define SETBASELVL 0x56DEB0
 static const int g_lvl20[3]={107,54,43};
+static const int g_gfind[2]={131,142}; /* G-find: Find Potion, Find Item for all classes */
 static int skill_base(void* u,int id){
   U8* s; int n=0; U8* l=*(U8**)((U8*)u+0xA8); if(!l) return -1;
   for(s=*(U8**)(l+4); s && n<512; s=*(U8**)(s+4), n++){
@@ -989,6 +990,13 @@ static void lvl20_fix(void* u){
     a=skill_base(u,id2);
     if(b>0) sync_client(u,id2,a); /* gsync: tell the client (SCMD 0x21) - 0x56DEB0 does not */
     logf_("G unit %u skill %d: base %d -> %d%s",id,id2,b,a,b>0?" (sent 0x21)":" (not owned, skipped)"); }
+  /* G-find (2026-10-20): every class gets Barbarian Find Potion 131 and Find Item 142 (0 mana in skills.txt).
+     find20 (2026-10-20): base level 20 for everyone incl. Barbarian; below 20 (or missing) -> 20, above 20 kept. */
+  for(i=0;i<2;i++){ int id2=g_gfind[i],a; b=skill_base(u,id2);
+    if(b>=0 && b<20) set_base(u,id2,20);
+    a=skill_base(u,id2);
+    if(a>0) sync_client(u,id2,a);
+    logf_("G-find unit %u skill %d: base %d -> %d",id,id2,b,a); }
 }
 /* I (DEV + BOSS-mod, cxmxdev.ini I=1, default 0): Fallen King (superuniques row 66, with escort) once per game
    near the Blood Moor (level 2) / Cold Plains (level 3) edge. Server, from mode_cb on a player walk/run.
@@ -2045,7 +2053,7 @@ static const IntegFile k_integ[]={
   {"data\\global\\excel\\overlay.txt",0xFC0032D9F22301C2ULL,1},
   {"data\\global\\excel\\shrines.txt",0x69CE851B44C3AE2AULL,1},
   {"data\\global\\excel\\skilldesc.txt",0x55D50D9407EC652EULL,1},
-  {"data\\global\\excel\\skills.txt",0x5EDA391429792F3BULL,1},
+  {"data\\global\\excel\\skills.txt",0xBB5FFE3767665DF4ULL,1},
   {"data\\global\\excel\\states.txt",0x2E410691826DA28BULL,1},
   {"data\\global\\excel\\superuniques.txt",0xCAEC5C1D253C4A98ULL,1},
   {"data\\global\\excel\\treasureclassex.txt",0xC9DCB1F01D6CE37FULL,1},
