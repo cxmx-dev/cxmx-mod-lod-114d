@@ -4,6 +4,14 @@ A single-player and LAN mod for Diablo II: Lord of Destruction 1.14d, loaded thr
 
 > **TEST BUILD.** Dev cheats are on: new characters start at level 25 with every difficulty open, and `/map`, `/$`, `/pot` and Telekinesis on any item work. Single player and LAN (TCP/IP) only. No Battle.net or online play.
 
+## What's new (2026-10-20)
+- Jewel-in-jewel nesting up to 7 deep, kept through moves, save and reload.
+- A "Contains:" box beside the tooltip of any item that holds socketed items.
+- Lost nested items are recovered into the inventory, stash, cube or ground on load.
+- "Gold Find +N%" / "Magic Find +N%" boxes on the player and merc panels, drawn under tooltips.
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 ## You need
 - Your own Diablo II + Lord of Destruction, patched to 1.14d
   (Game.exe version 1.14.3.71, SHA-256 `631066C1649C4EA9FFE48BF97E24C00BCA1F7A6759C21150F1A79982589ADAAF`).

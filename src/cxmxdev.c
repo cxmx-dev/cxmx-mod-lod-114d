@@ -23,7 +23,8 @@
    client send 0x478350) with a wall clock, because the buff itself runs on the host.
    2026-10-19 mfbox: the GF/MF panel boxes add the live socketed-potion buff (player and merc) to the client stats.
    2026-10-19 PTX: portrait teleport works from any area (see PTX above ptp_req).
-   2026-10-19 mfshare: a player's socketed-potion MF/GF buff is also put on his merc (real server buff, merc box + meter). */
+   2026-10-19 mfshare: a player's socketed-potion MF/GF buff is also put on his merc (real server buff, merc box + meter).
+   2026-10-19 jewelnest: NL recursive save item reader (0x5335E0) so jewels-in-jewels load whole; NI socket insert guard (0x562660). */
 #define _CRT_SECURE_NO_WARNINGS
 #include <windows.h>
 #include <stdio.h>
@@ -31,6 +32,7 @@
 #include <string.h>
 #include <math.h>
 typedef unsigned int U32; typedef unsigned char U8;
+static int g_diag; static int cfgCT; static void __stdcall ct_post(void); static void __stdcall lr_tick(unsigned char* g); static void nest_install(void); static void nd_install(void); static void __stdcall nd_tick(U8* g); static void nd_dump(U8* g,const char* why);
 
 #define STATE_ID   186
 #define BUFF_FRAMES (10*60*25)
@@ -295,10 +297,10 @@ static void mg_box(U8* u,int bx,int by,int maxw,const wchar_t* who,int gfb,int m
   wchar_t a[64], b[64]; int gf=GetUStat(u,79,0)+gfb, mf=GetUStat(u,80,0)+mfb, w1,w2,w,h=0,ww=0,i;
   typedef int (__fastcall *TW_t)(const wchar_t*);
   SetFont(0);
-  _snwprintf(a,63,L"%sGold Find: %+d%%",who,gf); a[63]=0; _snwprintf(b,63,L"%sMagic Find: %+d%%",who,mf); b[63]=0;
+  (void)who; /* 2026-10-20 CxMx: both boxes read "Gold Find +N%" / "Magic Find +N%" (no Merc prefix, no short form) */
+  _snwprintf(a,63,L"Gold Find %+d%%",gf); a[63]=0; _snwprintf(b,63,L"Magic Find %+d%%",mf); b[63]=0;
   w1=((TW_t)0x501820)(a); w2=((TW_t)0x501820)(b); w=w1>w2?w1:w2;
-  if(maxw>0 && w+8>maxw){ _snwprintf(a,63,L"%sGF: %+d%%",who,gf); a[63]=0; _snwprintf(b,63,L"%sMF: %+d%%",who,mf); b[63]=0;
-    w1=((TW_t)0x501820)(a); w2=((TW_t)0x501820)(b); w=w1>w2?w1:w2; }
+  (void)maxw;
   if(!g_mgh){ ((void(__fastcall*)(const wchar_t*,int*,int*))0x502520)(L"Gold Find",&ww,&h); g_mgh=(h>=6&&h<=30)?h:11;
     logf_("MG box: font 0 text height %d (measured %d), inventory box +%d,+%d, merc box +%d,+%d",g_mgh,h,mgPX,mgPY,mgMX,mgMY); }
   for(i=0;i<mgPasses;i++) ((void(__stdcall*)(int,int,int,int,int,int))0x4F6300)(bx,by,bx+w+8,by+2*g_mgh+8,0,1);
@@ -308,6 +310,46 @@ static void mg_box(U8* u,int bx,int by,int maxw,const wchar_t* who,int gfb,int m
 static int g_mglog[2][2]={{-1,-1},{-1,-1}};
 static void mg_log(int w,U8* u,int gb,int mb){ if(gb==g_mglog[w][0] && mb==g_mglog[w][1]) return; g_mglog[w][0]=gb; g_mglog[w][1]=mb;
   logf_("mfbox %s: GF %d gear + %d buff, MF %d gear + %d buff (box shows the totals)",w?"merc":"player",GetUStat(u,79,0),gb,GetUStat(u,80,0),mb); }
+/* MG overlay fix (2026-10-19): the GF/MF boxes are drawn after the game's panels, so they covered item tooltips.
+   0x5023B0 = framed popup text (callers 0x4A72EF client hover text, 0x4C0C8E). Its entry stamps g_popt; draw_mgf skips
+   the boxes while a popup was drawn in the last 120 ms (tooltip frames are drawn before our draw hook each frame). */
+static volatile DWORD g_popt; static U8* g_poptr;
+static int g_popn2; static void __stdcall pop_mark(void){ g_popt=GetTickCount(); if(++g_popn2<=3) logf_("MG tooltip guard: popup drawn (#%d)",g_popn2); }
+__declspec(naked) static void pop_stub(void){ __asm {
+  pushad
+  call pop_mark
+  popad
+  jmp dword ptr [g_poptr] } }
+static int g_popn;
+__declspec(naked) static void popc_stub(void){ __asm {
+  pushad
+  call pop_mark
+  popad
+  mov eax,0x5023B0
+  jmp eax } }
+static void pop_install(void){ static const U32 at[2]={0x4A72EF,0x4C0C8E}; int i,ok=0; U8 c[5]; U32 rel;
+  for(i=0;i<2;i++){ if(*(U8*)at[i]==0xE8 && at[i]+5+*(int*)(at[i]+1)==0x5023B0){ rel=(U32)popc_stub-(at[i]+5); c[0]=0xE8; memcpy(c+1,&rel,4); if(write_mem(at[i],c,5)) ok++; } }
+  g_poptr=(U8*)(ok?1:0);
+  logf_("MG tooltip guard: %s (%d/2 popup call sites 0x4A72EF/0x4C0C8E; entry 0x5023B0 is %02X %02X %02X)",ok?"ON":"SKIPPED",ok,*(U8*)0x5023B0,*(U8*)0x5023B1,*(U8*)0x5023B2); }
+static void draw_mgf(void); static int ctLines=16, ctDepth=7, ctPasses=3;
+/* MG draw order (2026-10-20): boxes drawn inside the game UI pass right before 0x503000 (the queued hover popup = item
+   tooltips, drawn last at 0x4572B5 in 0x456EE0), so tooltips land on top of the boxes. Fallback: draw_hook as before. */
+static int g_mgpre;
+static void __stdcall mg_pre(void){ if(cfgMG) draw_mgf(); }
+/* 2026-10-20 CT: the stub now also calls the popup itself, then draws the Contains: box after it (on top of the tooltip) */
+__declspec(naked) static void mgpre_stub(void){ __asm {
+  pushad
+  call mg_pre
+  popad
+  mov eax,0x503000
+  call eax
+  pushad
+  call ct_post
+  popad
+  ret } }
+static void mgpre_install(void){ U8 c[5]; U32 rel;
+  if(*(U8*)0x4572B5==0xE8 && 0x4572BA+*(int*)0x4572B6==0x503000){ rel=(U32)mgpre_stub-0x4572BA; c[0]=0xE8; memcpy(c+1,&rel,4); g_mgpre=write_mem(0x4572B5,c,5); }
+  logf_("MG draw order / CT hook: %s",g_mgpre?"ON (boxes before the hover popup 0x503000, tooltips on top)":"SKIPPED (0x4572B5 not call 0x503000) - boxes drawn after the UI as before"); }
 static void draw_mgf(void){
   U8* me; U8* m; int rx,ry,wx,ny,top;
   __try {
@@ -485,7 +527,7 @@ static void __stdcall draw_hook(void){
   if(!g_done) try_install();
   pt_frame();
   if(g_meteron) draw_meters();
-  if(cfgMG) draw_mgf();
+  if(cfgMG && !g_mgpre) draw_mgf();
 }
 /* Same pattern as the game's own timed states (0x56E970 / potion 0x5BE3F0). Every drink gets
    its OWN stat list: alloc timed list (flag 2) with its own expiry, state 186, remove-callback
@@ -1850,6 +1892,14 @@ __declspec(naked) static void frame_stub(void){ __asm {
   push edi
   call j_tick
   popad
+  pushad
+  push edi
+  call nd_tick
+  popad
+  pushad
+  push edi
+  call lr_tick
+  popad
   push 0x52D7B0
   ret
 }}
@@ -2108,6 +2158,11 @@ static void install(void){
   mgMX=GetPrivateProfileIntA("features","MGMX",14,g_ini); mgMY=GetPrivateProfileIntA("features","MGMY",375,g_ini);
   mgPW=GetPrivateProfileIntA("features","MGPW",104,g_ini); mgMW=GetPrivateProfileIntA("features","MGMW",250,g_ini);
   mgPasses=GetPrivateProfileIntA("features","MGBoxPasses",2,g_ini); if(mgPasses<0) mgPasses=0; if(mgPasses>4) mgPasses=4;
+  cfgCT=cfg("CT"); ctLines=GetPrivateProfileIntA("features","CTLines",16,g_ini); if(ctLines<3) ctLines=3; if(ctLines>40) ctLines=40;
+  ctDepth=GetPrivateProfileIntA("features","CTDepth",7,g_ini); if(ctDepth<1) ctDepth=1; if(ctDepth>12) ctDepth=12;
+  ctPasses=GetPrivateProfileIntA("features","CTBoxPasses",3,g_ini); if(ctPasses<0) ctPasses=0; if(ctPasses>5) ctPasses=5;
+  if(cfgMG||cfgCT) mgpre_install();
+  logf_("CT Contains: tooltip: %s (lines %d, depth %d, box passes %d)",cfgCT?(g_mgpre?"ON":"no hook"):"OFF",ctLines,ctDepth,ctPasses);
   logf_("MG Gold/Magic Find text: %s (inventory +%d,+%d, merc panel +%d,+%d)",cfgMG?"ON":"OFF (cxmxdev.ini)",mgPX,mgPY,mgMX,mgMY);
   { static const U8 ea[]={0x55,0x8B,0xEC,0x83,0xEC,0x10}, eb[]={0x55,0x8B,0xEC,0x83,0xEC,0x08}; int ok=0; U8 c[6]; U32 rel;
     if(cfgC3){
@@ -2122,6 +2177,8 @@ static void install(void){
   gcJump=GetPrivateProfileIntA("features","GCJump",6,g_ini); if(gcJump<3) gcJump=3;
   logf_("GC gold pickup during Charge/Teleport: %s (radius %d subtiles, jump >= %d, server frame hook %s)",cfgGC?"ON":"OFF (cxmxdev.ini)",gcRad,gcJump,g_fhook?"on":"MISSING - inactive");
   j_install();
+  /* nest_install() now runs in DllMain (2026-10-19): the save reader must be hooked before the first character load */
+  nd_install();
   cfgCW=GetPrivateProfileIntA("features","CW",0,g_ini)!=0; cwDist=GetPrivateProfileIntA("features","CWDist",12,g_ini); if(cwDist<3) cwDist=3; if(cwDist>30) cwDist=30;
   cfgFQ=GetPrivateProfileIntA("features","FQ",0,g_ini)!=0; fqDist=GetPrivateProfileIntA("features","FQDist",8,g_ini); if(fqDist<3) fqDist=3; if(fqDist>30) fqDist=30;
   { static const U8 su[]={0x55,0x8B,0xEC,0x81,0xEC,0x10,0x01,0x00,0x00,0xA1,0xE0,0x9D,0x74,0x00}; U32 rel;
@@ -2135,6 +2192,600 @@ static void install(void){
       else logf_("FQ Frostquill: SKIPPED (write failed)"); } }
   if(*(volatile U8*)0x558D90!=0xE9 || !g_stab0) logf_("install: BaseMod 0x558D90 not stable after %lu ms",GetTickCount()-g_t0);
 }
+/* ---- jewelnest (2026-10-19, CxMx: jewels-in-jewels "optimized and functional") ----
+   Cause found (static, Game.exe 1.14d): the save WRITER 0x6312B0 is recursive (an item, then every item in its
+   inventory, depth first), but the 1.10+ item-list READER 0x5335E0 reads only ONE level of socketed children and
+   ignores each child's own socket count, and it ignores the result of the socket insert (0x531210 -> 0x562660).
+   0x562660 refuses a child when the parent's filled count >= its socket count (0x5627A5: 0x63CD60 >= 0x6299B0), so
+   overflow children were created and silently dropped (JN-Seven: belt has 4 sockets, children 5-7 gone). A real
+   nested save (gem in a jewel in a belt) made the stock reader take the grandchild as the next top-level item:
+   it was dropped and the last real item of that list was never read. Not a duplicate check: the only dupe check
+   (fingerprints) is in the old pre-1.10 reader 0x533350 and only covers top-level items.
+   Fix: NL) 0x5335E0 is replaced by the same reader, made recursive (grandchildren go into their own parent, same
+   game calls and order as the stock code), with a depth guard and a log line for any child the game refuses.
+   NI) the socket insert 0x562660 refuses (item stays on the cursor, 3 s message) inserting into an item that is
+   itself in a socket, or a chain deeper than NestMax (cxmxdev.ini, default 7). Ordinary sockets are untouched. */
+static int g_nestguard=0; /* 2026-10-19: lifted, the flattening was the item duplicate 0x55A2A0 (fixed by dup_kids). Was: 2026-10-19: nested saves drop items on save (writer), so any item holding children is refused until the writer fix */
+static int cfgNest, g_nestmax=7, g_nlogn, g_nlload; static U8* g_instr; /* g_nlload: inside the save reader, the guard stays out of the way */
+static U32 __declspec(naked) __stdcall t62ae20(U8* b,int rem,void* hdr,int ver){ __asm {
+  push ebp
+  mov ebp,esp
+  push ebx
+  push esi
+  push edi
+  push dword ptr [ebp+0x14]
+  push dword ptr [ebp+0x10]
+  push 1
+  push dword ptr [ebp+0x0C]
+  push dword ptr [ebp+0x08]
+  mov eax,0x62AE20
+  call eax
+  pop edi
+  pop esi
+  pop ebx
+  pop ebp
+  ret 0x10 } }
+static U32 __declspec(naked) __stdcall t558cb0(U32 game,U8* b,int rem,void* hdr,int* plen,int ver){ __asm {
+  push ebp
+  mov ebp,esp
+  push ebx
+  push esi
+  push edi
+  mov ebx,[ebp+0x08]
+  push dword ptr [ebp+0x1C]
+  push dword ptr [ebp+0x18]
+  push dword ptr [ebp+0x14]
+  push 1
+  push dword ptr [ebp+0x10]
+  push dword ptr [ebp+0x0C]
+  xor edx,edx
+  mov ecx,ebx
+  mov eax,0x558CB0
+  call eax
+  pop edi
+  pop esi
+  pop ebx
+  pop ebp
+  ret 0x18 } }
+static void __declspec(naked) __stdcall t564cb0(U32 item){ __asm {
+  push ebp
+  mov ebp,esp
+  push ebx
+  push esi
+  push edi
+  mov ecx,[ebp+0x08]
+  mov eax,0x564CB0
+  call eax
+  pop edi
+  pop esi
+  pop ebx
+  pop ebp
+  ret 4 } }
+/* flag path: 0x531520 ecx=item eax=parent, stack (game, unit) */
+static U32 __declspec(naked) __stdcall t531520(U32 game,U32 unit,U32 item,U32 parent){ __asm {
+  push ebp
+  mov ebp,esp
+  push ebx
+  push esi
+  push edi
+  mov ebx,[ebp+0x08]
+  push dword ptr [ebp+0x0C]
+  push ebx
+  mov ecx,[ebp+0x10]
+  mov eax,[ebp+0x14]
+  mov edx,0x531520
+  call edx
+  pop edi
+  pop esi
+  pop ebx
+  pop ebp
+  ret 0x10 } }
+/* 0x531210 ecx=game edx=unit, stack (item, parent) */
+static U32 __declspec(naked) __stdcall t531210(U32 game,U32 unit,U32 item,U32 parent){ __asm {
+  push ebp
+  mov ebp,esp
+  push ebx
+  push esi
+  push edi
+  mov ebx,[ebp+0x08]
+  push dword ptr [ebp+0x14]
+  push dword ptr [ebp+0x10]
+  mov ecx,ebx
+  mov edx,[ebp+0x0C]
+  mov eax,0x531210
+  call eax
+  pop edi
+  pop esi
+  pop ebx
+  pop ebp
+  ret 0x10 } }
+static void __declspec(naked) __stdcall t555600(U32 game,U32 item){ __asm {
+  push ebp
+  mov ebp,esp
+  push ebx
+  push esi
+  push edi
+  mov ebx,[ebp+0x08]
+  mov ecx,ebx
+  mov edx,[ebp+0x0C]
+  mov eax,0x555600
+  call eax
+  pop edi
+  pop esi
+  pop ebx
+  pop ebp
+  ret 8 } }
+static void __declspec(naked) __stdcall t563470(U32 game,U32 unit,U32 item){ __asm {
+  push ebp
+  mov ebp,esp
+  push ebx
+  push esi
+  push edi
+  mov ebx,[ebp+0x08]
+  push dword ptr [ebp+0x10]
+  mov ecx,ebx
+  mov edx,[ebp+0x0C]
+  mov eax,0x563470
+  call eax
+  pop edi
+  pop esi
+  pop ebx
+  pop ebp
+  ret 0x0C } }
+static U32 __declspec(naked) __stdcall t552f60(U32 game,U32 type,U32 id){ __asm {
+  push ebp
+  mov ebp,esp
+  push ebx
+  push esi
+  push edi
+  push dword ptr [ebp+0x10]
+  mov ecx,[ebp+0x08]
+  mov edx,[ebp+0x0C]
+  mov eax,0x552F60
+  call eax
+  pop edi
+  pop esi
+  pop ebx
+  pop ebp
+  ret 0x0C } }
+typedef U32 (__stdcall *U1_t)(U32);
+#define NL_FIRST(inv) ((U1_t)0x63B2C0)(inv)
+#define NL_NEXT(n)    ((U1_t)0x63DFA0)(n)
+#define NL_UNIT(n)    ((U1_t)0x63DFD0)(n)
+static void lr_queue(U32 game,U32 unit,U32 item);
+static int nl_one(U32 game,U32 unit,U8* buf,int size,int ver,int flag,U8** pp,U32 parent,int depth){
+  U8 hdr[64]; int len=0,filled,k,r,ok; U32 item,holder=0; int rem=size-(int)(*pp-buf);
+  if(depth>32){ logf_("NL nest reader: depth %d > 32, load stopped (save left untouched)",depth); return 0xE; }
+  memset(hdr,0,sizeof hdr);
+  t62ae20(*pp,rem,hdr,ver);
+  if(depth==0 && *(int*)hdr==-1) return 0xE;
+  item=t558cb0(game,*pp,rem,hdr,&len,ver);
+  if(!item && len<=0) return 0xE;
+  *pp+=len; filled=*(int*)(hdr+0x14);
+  if(depth==0){
+    if(item){ t564cb0(item); ok=flag?t531520(game,unit,item,0):t531210(game,unit,item,0);
+      if(ok){ t555600(game,item); } else holder=item; } }
+  else if(item){
+    if(!parent){ t555600(game,item); }
+    else { t564cb0(item); ok=flag?t531520(game,unit,item,parent):t531210(game,unit,item,parent);
+      if(ok){ g_nlogn++; holder=item; /* 2026-10-20 LR: keep it (and its own children) and give it back once in game */
+        logf_("NL LOST #%d: socketed item %u (class %u) refused by its parent %u at depth %d (parent full) - queued for recovery (inventory/stash/cube/ground)",g_nlogn,*(U32*)(item+0xC),*(U32*)(item+4),*(U32*)(parent+0xC),depth);
+        lr_queue(game,unit,item); }
+      else { holder=item; if(depth>=2 && ++g_nlogn<=40) logf_("NL nested load: item %u at depth %d into %u",*(U32*)(item+0xC),depth,*(U32*)(parent+0xC)); } } }
+  for(k=0;k<filled;k++){ r=nl_one(game,unit,buf,size,ver,flag,pp,holder,depth+1); if(r) return r; }
+  if(depth==0 && holder && (((U1_t)0x628110)(holder)&0x4000000) && !((U1_t)0x62BED0)(holder)) t563470(game,unit,holder);
+  return 0;
+}
+static int __stdcall nl_read(U32 game,U32 unit,U8* buf,int ver,int size,int flag,int* outlen){
+  U8* p=buf; int cnt,i,r;
+  if(*(unsigned short*)p!=0x4D4A) return 0xE;
+  cnt=*(unsigned short*)(p+2); p+=4;
+  g_nlload++; r=0;
+  for(i=0;i<cnt && !r;i++) r=nl_one(game,unit,buf,size,ver,flag,&p,0,0);
+  g_nlload--; if(r) return r;
+  nd_dump((U8*)game,"after save-list load");
+  if(outlen) *outlen=(int)(p-buf);
+  return 0;
+}
+__declspec(naked) static void nl_stub(void){ __asm {
+  pop eax
+  push edx
+  push ecx
+  push eax
+  jmp nl_read } }
+static int nl_depth(U32 it,int g){ U32 inv,n; int m=0,d; if(g>40) return 99; inv=*(U32*)(it+0x60); if(!inv) return 0;
+  for(n=NL_FIRST(inv);n;n=NL_NEXT(n)){ U32 u=NL_UNIT(n); if(u){ d=1+nl_depth(u,g+1); if(d>m) m=d; } } return m; }
+static void modoff(U32 a,char* o,int cap);
+static U32 g_niret,g_niret2; static int g_nitr;
+static int __stdcall ni_ok(U32 game,U32 player,U32 cid,U32 pid){ U32 ch,pa; int sub;
+  if(g_diag && !g_nlload && ++g_nitr<=80){ char a[96],b[96]; modoff(g_niret,a,sizeof a); modoff(g_niret2,b,sizeof b); logf_("ND trace: socket insert %u into %u (loader %d) from %s (its caller %s)",cid,pid,g_nlload,a,b); }
+  if(g_nlload) return 1;
+  __try { ch=t552f60(game,4,cid); pa=t552f60(game,4,pid);
+    if(!ch||!pa||*(U32*)ch!=4||*(U32*)pa!=4) return 1;
+    sub=nl_depth(ch,0);
+    if(*(U32*)(pa+0x10)==6){ logf_("NI refused: item %u into %u, which is itself in a socket (build chains bottom-up in the inventory)",cid,pid);
+      if(LOCALPL && player && *(U32*)(LOCALPL+0xC)==*(U32*)(player+0xC)) pt_say(L"Can't socket that here%s",""); return 0; }
+    if(sub && g_nestguard){ logf_("NI refused: item %u holds socketed items (nesting guard, saves would drop them) into %u",cid,pid);
+      if(LOCALPL && player && *(U32*)(LOCALPL+0xC)==*(U32*)(player+0xC)) pt_say(L"Can't socket that here%s",""); return 0; }
+    if(sub && 1+sub>g_nestmax){ logf_("NI refused: item %u (chain %d deep) into %u would be %d levels > NestMax %d",cid,sub,pid,1+sub,g_nestmax);
+      if(LOCALPL && player && *(U32*)(LOCALPL+0xC)==*(U32*)(player+0xC)) { char nb[8]; _snprintf(nb,7,"%d",g_nestmax); nb[7]=0; pt_say(L"Socket chain too deep (max %s levels)",nb); } return 0; }
+    if(sub && ++g_nlogn<=40) logf_("NI nested insert: item %u (holds a chain %d deep) into %u",cid,sub,pid);
+  } __except(1){ return 1; }
+  return 1; }
+__declspec(naked) static void ni_stub(void){ __asm {
+  mov eax,[esp]
+  mov g_niret,eax
+  mov eax,[ebp+4]
+  mov g_niret2,eax
+  push ecx
+  push edx
+  push dword ptr [esp+0x10]
+  push dword ptr [esp+0x10]
+  push edx
+  push ecx
+  call ni_ok
+  pop edx
+  pop ecx
+  test eax,eax
+  jz refuse
+  jmp dword ptr [g_instr]
+refuse:
+  mov eax,[esp+0x0C]
+  test eax,eax
+  jz r0
+  mov dword ptr [eax],0
+r0:
+  xor eax,eax
+  ret 0x1C } }
+/* ---- ND fix (2026-10-19): item duplicate 0x55A2A0 rebuilt nested chains flat ----
+   The game re-creates an item (new unit id) when it moves between owners, e.g. merc <-> player. 0x55A2A0 writes the
+   item with the recursive save writer 0x6313E0, then reads it back: the item, then "filled" children in a flat loop.
+   A child that holds its own children was read, but its children were taken as siblings and the last records were never
+   read (DiagA: belt 109 [110->111,112,113] became 234 [235,236,237], 113 lost). dup_kids replaces that loop with the
+   same calls, recursively (parent = the child that holds them). */
+typedef U32 (__fastcall *DupMake_t)(U32 game,U32 owner,U8* buf,int size,int one,U8* hdr,int* len,int cap);
+typedef U32 (__fastcall *DupIns_t)(U32 game,U32 parent,U32 cid,U32 pid,U32* tmp,int a,int b,int c,int d); /* ret 0x1C; 0x451F50 just returns parent+0xC */
+typedef void (__stdcall *DupHdr_t)(U8* buf,int size,int one,U8* hdr);
+typedef void (__stdcall *DupFl_t)(U32 it,U32 fl,U32 on);
+typedef void (__stdcall *DupMode_t)(U32 it,U32 mode);
+static int g_dupn;
+static int dup_kids_r(U32 game,U32 parent,U8** pb,int* rem,int count,int depth){ int k; U8 hdr[64]; int len; U32 ch,tmp;
+  if(depth>32) return 0;
+  for(k=0;k<count;k++){
+    memset(hdr,0,sizeof hdr); len=0;
+    ((DupHdr_t)0x62E410)(*pb,*rem,1,hdr);
+    ch=((DupMake_t)0x558CB0)(game,0,*pb,*rem,1,hdr,&len,0x60);
+    if(!ch) return 0;
+    *pb+=len; *rem-=len;
+    if(g_diag && ++g_dupn<=200) logf_("ND dup: d%d child %d/%d item %u cls %u len %d hdr14 %d (hdr10 %d hdr18 %d) parent %u",depth,k+1,count,*(U32*)(ch+0xC),*(U32*)(ch+4),len,*(int*)(hdr+0x14),*(int*)(hdr+0x10),*(int*)(hdr+0x18),*(U32*)(parent+0xC));
+    ((DupMode_t)0x624690)(ch,4);
+    tmp=0;
+    if(!((DupIns_t)0x562660)(game,parent,*(U32*)(ch+0xC),*(U32*)(parent+0xC),&tmp,0,1,0,0)){ logf_("ND dup: insert of %u into %u refused",*(U32*)(ch+0xC),*(U32*)(parent+0xC)); return 0; }
+    ((DupFl_t)0x6280D0)(ch,0x80000,1); ((DupFl_t)0x6280D0)(ch,0x2000,0); ((DupFl_t)0x628170)(ch,1,0);
+    if(*(int*)(hdr+0x14)>0 && !dup_kids_r(game,ch,pb,rem,*(int*)(hdr+0x14),depth+1)) return 0; }
+  return 1; }
+static int __stdcall dup_kids(U32 game,U32 parent,U8* buf,int rem,int count){ int r; if(g_diag && g_dupn<200) logf_("ND dup: copy of item %u (cls %u), %d children, %d bytes left",*(U32*)(parent+0xC),*(U32*)(parent+4),count,rem); g_nlload++; r=dup_kids_r(game,parent,&buf,&rem,count,0); g_nlload--; return r; }
+__declspec(naked) static void dup_stub(void){ __asm {
+  cmp dword ptr [ebp+0x0C],0
+  je dskip
+  mov eax,[ebp-0x424]
+  test eax,eax
+  jle dskip
+  pushad
+  push eax
+  push ebx
+  push dword ptr [ebp-0x408]
+  push edi
+  push esi
+  call dup_kids
+  mov [esp+0x1C],eax
+  popad
+  test eax,eax
+  jz dfail
+dskip:
+  push 0x55A46E
+  ret
+dfail:
+  push 0x55A327
+  ret } }
+/* ND trace (diag): which item-copy reader runs on a merc/player move. 0x55A2A0 dup (logged in dup_kids), 0x541990
+   deferred item list, 0x56ACE0 item-from-buffer reader. Entry logs only, capped. */
+static U8 *g_tr1,*g_tr2; static int g_trn;
+static void __stdcall tr_log(U32 which,U32 ret){ if(++g_trn<=120) logf_("ND trace: reader %s called from %08X",which==1?"0x541990":"0x56ACE0",ret); }
+__declspec(naked) static void tr1_stub(void){ __asm { pushad
+  push dword ptr [esp+0x20]
+  push 1
+  call tr_log
+  popad
+  jmp dword ptr [g_tr1] } }
+__declspec(naked) static void tr2_stub(void){ __asm { pushad
+  push dword ptr [esp+0x20]
+  push 2
+  call tr_log
+  popad
+  jmp dword ptr [g_tr2] } }
+static U8* tr_hook(U32 at,const U8* pb,void* stub){ U8* t; U32 rel;
+  if(!bytes_eq(at,pb,6) || !(t=(U8*)VirtualAlloc(0,16,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE))) return 0;
+  memcpy(t,pb,6); t[6]=0xE9; rel=(at+6)-((U32)t+11); memcpy(t+7,&rel,4);
+  if(!write_jmp(at,stub)) return 0; { U8 n=0x90; write_mem(at+5,&n,1); } return t; }
+static void tr_install(void){ static const U8 a[]={0x55,0x8B,0xEC,0x83,0xEC,0x28}, b[]={0x55,0x8B,0xEC,0x83,0xEC,0x30};
+  g_tr1=tr_hook(0x541990,a,(void*)tr1_stub); g_tr2=tr_hook(0x56ACE0,b,(void*)tr2_stub);
+  logf_("ND trace hooks: 0x541990 %s, 0x56ACE0 %s",g_tr1?"on":"SKIPPED",g_tr2?"on":"SKIPPED"); }
+/* ND trace 2 (diag): every item create-from-bits 0x558CB0 outside the save loader logs who called it (module+offset),
+   to find the copy path behind a merc -> inventory move (none of 0x55A2A0/0x541990/0x56ACE0 ran in that test). */
+static void modoff(U32 a,char* o,int cap);
+static U8* g_trc; static int g_trcn;
+static void __stdcall trc_log(U32 ret,U32 ret2){ char a[96],b[96]; if(g_nlload || ++g_trcn>150) return;
+  modoff(ret,a,sizeof a); modoff(ret2,b,sizeof b); logf_("ND trace: item from bits 0x558CB0 called from %s (its caller %s)",a,b); }
+__declspec(naked) static void trc_stub(void){ __asm { pushad
+  mov eax,[ebp+4]
+  push eax
+  push dword ptr [esp+0x24]
+  call trc_log
+  popad
+  jmp dword ptr [g_trc] } }
+static void trc_install(void){ static const U8 pb[]={0x55,0x8B,0xEC,0x53,0x57,0x8B,0xF9};
+  if(bytes_eq(0x558CB0,pb,7) && (g_trc=(U8*)VirtualAlloc(0,16,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE))){ U32 rel;
+    memcpy(g_trc,pb,7); g_trc[7]=0xE9; rel=0x558CB7-((U32)g_trc+12); memcpy(g_trc+8,&rel,4);
+    if(write_jmp(0x558CB0,(void*)trc_stub)){ U8 n[2]={0x90,0x90}; write_mem(0x558CB5,n,2); logf_("ND trace 0x558CB0: on"); return; } }
+  g_trc=0; logf_("ND trace 0x558CB0: SKIPPED (bytes mismatch)"); }
+static U8* g_tri; static int g_trin; static U32 g_trir2;
+static void __stdcall tri_log(U32 ret,U32 ret2,U32 inv,U32 item){ char a[96],b[96]; U8* it=(U8*)item;
+  if(g_nlload || !it || (ret>=0x4C0000 && ret<0x4C6000) || ++g_trin>150) return; /* skip client item-packet handlers 0x4C0000-0x4C6000 */ __try { if(*(U32*)it!=4) return;
+  modoff(ret,a,sizeof a); modoff(ret2,b,sizeof b);
+  logf_("ND trace: inventory add item %u cls %u mode %u (inv %08X) from %s (its caller %s)",*(U32*)(it+0xC),*(U32*)(it+4),*(U32*)(it+0x10),inv,a,b); } __except(1){} }
+__declspec(naked) static void tri_stub(void){ __asm { pushad
+  push dword ptr [esp+0x28]
+  push dword ptr [esp+0x28]
+  mov eax,[ebp+4]
+  push eax
+  push dword ptr [esp+0x2C]
+  call tri_log
+  popad
+  jmp dword ptr [g_tri] } }
+static void tri_install(void){ static const U8 pb[]={0x55,0x8B,0xEC,0x56,0x8B,0x75,0x08};
+  if(bytes_eq(0x63B210,pb,7) && (g_tri=(U8*)VirtualAlloc(0,16,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE))){ U32 rel;
+    memcpy(g_tri,pb,7); g_tri[7]=0xE9; rel=0x63B217-((U32)g_tri+12); memcpy(g_tri+8,&rel,4);
+    if(write_jmp(0x63B210,(void*)tri_stub)){ U8 n[2]={0x90,0x90}; write_mem(0x63B215,n,2); logf_("ND trace 0x63B210 inventory add: on"); return; } }
+  g_tri=0; logf_("ND trace 0x63B210: SKIPPED"); }
+/* ND fix 2 (2026-10-20): the flat copy on merc <-> player moves is BaseMod.dll+0x9240, BaseMod's own copy of the game's
+   item duplicate 0x55A2A0 (same serialize/read, flat child loop, inserts via its socket insert +0x13F00 -> 0x63B210).
+   Trace: children 235/236/237 placed by BaseMod.dll+0x1402A. Fix: BaseMod+0x9240 (fastcall game,item; 1 stack arg
+   = copy sockets, ret 4) jumps to the game's 0x55A2A0 (same regs; stack (unused, flag), ret 8), whose child loop is
+   recursive through dup_kids. */
+static U32 g_bmdup;
+__declspec(naked) static void bmdup_stub(void){ __asm {
+  pop eax
+  push 0
+  push eax
+  mov eax,0x55A2A0
+  jmp eax } }
+static void bmdup_install(void){ static const U8 pb[]={0x55,0x8B,0xEC,0x83,0xE4,0xF8,0x81,0xEC,0x3C,0x04,0x00,0x00};
+  HMODULE bm=GetModuleHandleA("BaseMod.dll"); U32 at=bm?(U32)bm+0x9240:0;
+  if(!at) { logf_("ND BaseMod copy redirect: SKIPPED (BaseMod.dll not loaded)"); return; }
+  if(!bytes_eq(at,pb,sizeof pb)) { logf_("ND BaseMod copy redirect: SKIPPED (BaseMod.dll+0x9240 bytes differ - other BaseMod version?)"); return; }
+  if(write_jmp(at,(void*)bmdup_stub)){ g_bmdup=at; logf_("ND BaseMod copy redirect: ON (BaseMod.dll+0x9240 -> 0x55A2A0 recursive)"); }
+  else logf_("ND BaseMod copy redirect: write failed"); }
+static void dup_install(void){ static const U8 db[]={0x83,0x7D,0x0C,0x00,0x0F,0x84,0xF9,0x00,0x00,0x00};
+  if(!bytes_eq(0x55A36B,db,sizeof db)) logf_("ND dup fix (0x55A2A0 nested copy): SKIPPED (0x55A36B bytes mismatch)");
+  else logf_("ND dup fix (0x55A2A0 nested copy): %s",write_jmp(0x55A36B,(void*)dup_stub)?"ON":"write failed"); }
+static void nest_install(void){
+  static const U8 rb[]={0x55,0x8B,0xEC,0x83,0xEC,0x34,0x53,0x56,0x8B,0x75,0x08}, ib[]={0x55,0x8B,0xEC,0x83,0xEC,0x08};
+  cfgNest=cfg("NEST"); g_nestmax=GetPrivateProfileIntA("features","NestMax",7,g_ini); if(g_nestmax<1) g_nestmax=1; if(g_nestmax>12) g_nestmax=12;
+  if(!cfgNest){ logf_("NEST jewel-in-jewel reader/insert guard: OFF (cxmxdev.ini)"); return; }
+  if(!bytes_eq(0x5335E0,rb,sizeof rb)) logf_("NL recursive item reader: SKIPPED (0x5335E0 bytes mismatch - another hook?)");
+  else logf_("NL recursive item reader: %s (0x5335E0, depth guard 32)",write_jmp(0x5335E0,(void*)nl_stub)?"ON":"write failed");
+  if(!bytes_eq(0x562660,ib,sizeof ib)) logf_("NI socket insert guard: SKIPPED (0x562660 bytes mismatch)");
+  else if(!(g_instr=(U8*)VirtualAlloc(0,16,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE))) logf_("NI socket insert guard: SKIPPED (no trampoline)");
+  else { U32 rel; memcpy(g_instr,ib,6); g_instr[6]=0xE9; rel=0x562666-((U32)g_instr+11); memcpy(g_instr+7,&rel,4);
+    if(write_jmp(0x562660,(void*)ni_stub)){ U8 n=0x90; write_mem(0x562665,&n,1); logf_("NI socket insert guard: ON (0x562660, NestMax %d, nesting guard %s)",g_nestmax,g_nestguard?"ON":"off"); }
+    else logf_("NI socket insert guard: write failed"); }
+  dup_install();
+  bmdup_install();
+  g_diag=GetPrivateProfileIntA("features","ND",0,g_ini)!=0; /* release 2026-10-20: traces only with ND=1 */
+  if(g_diag){ tr_install(); trc_install(); tri_install(); }
+}
+
+/* ---- LR lost-item recovery (2026-10-20, DEV) ----
+   A nested child its parent refuses at load (NL LOST, parent full) used to be dropped from the load (gone at the next save).
+   Now it is kept with its own subtree and queued; once the owner is in game (server frame tick) it is placed with the
+   game's own placer 0x560200 (the one /pot and quest items use): inventory, then stash, then cube; failing all, it is dropped
+   at the owner's feet with the game's drop path (0x620870 coords, 0x620BB0 free spot, 0x558AA0 drop). Each step is logged. */
+typedef struct { U32 game, utype, uid, iid; int tries; U32 next; } LrEnt;
+static LrEnt g_lr[32]; static int g_nlr, g_lrok;
+static void lr_queue(U32 game,U32 unit,U32 item){ if(g_nlr>=32){ logf_("LR queue full: item %u not queued",*(U32*)(item+0xC)); return; }
+  g_lr[g_nlr].game=game; g_lr[g_nlr].utype=*(U32*)unit; g_lr[g_nlr].uid=*(U32*)(unit+0xC); g_lr[g_nlr].iid=*(U32*)(item+0xC); g_lr[g_nlr].tries=0; g_lr[g_nlr].next=0; g_nlr++; }
+static int lr_place(U32 game,U32 pl,U32 item,int page){ U8* d=*(U8**)(item+0x14); U8 old; int r=0;
+  if(!d) return 0; old=d[0x45]; d[0x45]=(U8)page;
+  ((void(__stdcall*)(U32,U32))0x624690)(item,4);
+  __try { r=Place((void*)0x6E0BE4,(void*)0x9CF,game,pl,*(U32*)(item+0xC),0,0,1,1,0); } __except(1){ r=0; }
+  if(!r) d[0x45]=old; return r; }
+static int lr_ground(U32 game,U32 pl,U32 item){ int pcx=0,pcy=0; U32 room=0,lrr=0,lsv=0;
+  __try { __asm {
+    mov lsv,esp
+    lea eax,pcx
+    push eax
+    push pl
+    mov eax,0x620870
+    call eax
+    mov esp,lsv
+    push 0x64
+    push 5
+    lea eax,room
+    push eax
+    push 0x3E01
+    push 1
+    push pl
+    mov eax,0x620BB0
+    call eax
+    mov esp,lsv
+    mov lrr,eax } } __except(1){ return 0; }
+  if(!lrr || !room) return 0;
+  __try { __asm {
+    mov lsv,esp
+    mov ecx,lrr
+    lea edx,pcx
+    mov eax,0x545340
+    call eax
+    mov esp,lsv
+    push pcy
+    push pcx
+    push room
+    push item
+    xor edx,edx
+    mov ecx,game
+    mov eax,0x558AA0
+    call eax
+    mov esp,lsv } } __except(1){ return 0; }
+  return *(U32*)(item+0x10)==3 || *(U32*)(item+0x10)==5; }
+static void __stdcall lr_tick(U8* g){ int i; U32 pl,it,f; const char* where;
+  if(!g_nlr) return;
+  __try { f=*(U32*)(g+0xA8);
+  for(i=0;i<g_nlr;i++){ LrEnt* e=&g_lr[i]; where=0;
+    if(e->game!=(U32)g || f<e->next) continue;
+    if(!e->next){ e->next=f+75; continue; } /* first sight: give the join 3 s to settle */
+    e->next=f+25;
+    pl=t552f60((U32)g,e->utype,e->uid); it=t552f60((U32)g,4,e->iid);
+    if(!it){ logf_("LR: item %u is gone (freed by the game) - nothing to recover",e->iid); e->tries=99; }
+    else if(!pl || !*(U32*)(pl+0x2C)){ if(++e->tries>=40){ logf_("LR: owner %u of item %u never got in game - giving up (item stays unplaced)",e->uid,e->iid); e->tries=99; } }
+    else { if(lr_place((U32)g,pl,it,0)) where="inventory"; else if(lr_place((U32)g,pl,it,4)) where="stash"; else if(lr_place((U32)g,pl,it,3)) where="cube";
+      else if(lr_ground((U32)g,pl,it)) where="the ground at your feet";
+      if(where){ g_lrok++; logf_("LR: recovered item %u (class %u) into %s of unit %u",e->iid,*(U32*)(it+4),where,e->uid); e->tries=99;
+        if(LOCALPL && *(U32*)(LOCALPL+0xC)==e->uid) pt_say(L"Recovered a socketed item that did not fit: now in %s",where); }
+      else if(++e->tries>=10){ logf_("LR: item %u could not be placed anywhere after 10 tries - left unplaced",e->iid); e->tries=99; } } }
+  for(i=0;i<g_nlr;) if(g_lr[i].tries>=99){ g_lr[i]=g_lr[--g_nlr]; } else i++;
+  } __except(1){ logf_("LR: fault in recovery tick, queue cleared"); g_nlr=0; } }
+
+/* ---- CT "Contains:" tooltip (2026-10-20, DEV, client side) ----
+   Hovered item = [0x7BCBF4] (set by the inventory hover code 0x4871F0 from the grid lookup 0x63BD10, read by the item
+   description builder at 0x48D0DC). Drawn from mgpre_stub right after the hover popup 0x503000, so it lies on top of the
+   tooltip layer. Box sits beside the mouse (tooltip is above the item). Tree: indented per level, name in the game's
+   quality colour, "Socketed (x/y)" for items that have sockets, depth cap CTDepth, line cap CTLines with "+N more". */
+typedef struct { wchar_t t[80]; int d, col, sock, fill; } CtLine;
+static CtLine g_ct[42]; static int g_ctn, g_ctmore, g_ctlog;
+static void __declspec(naked) __stdcall ct_name(U32 item,wchar_t* buf,int len){ __asm {
+  push ebp
+  mov ebp,esp
+  push ebx
+  push esi
+  push edi
+  mov esi,esp
+  push dword ptr [ebp+0x10]
+  mov edx,[ebp+0x0C]
+  mov ecx,[ebp+0x08]
+  mov eax,0x48C060
+  call eax
+  mov esp,esi
+  pop edi
+  pop esi
+  pop ebx
+  pop ebp
+  ret 0x0C } }
+static int ct_col(U8* it){ U8* d=*(U8**)(it+0x14); U32 q=d?*(U32*)d:2; int s=(int)((U8(__stdcall*)(U8*))0x6299B0)(it);
+  switch(q){ case 1: return 5; case 4: return 3; case 5: return 2; case 6: return 9; case 7: return 4; case 8: return 8; }
+  return s>0?5:0; }
+static void ct_clean(const wchar_t* in,wchar_t* out,int cap){ wchar_t ln[4][80]; int nl=0,k=0,i; const wchar_t* p;
+  memset(ln,0,sizeof ln);
+  for(p=in;*p && nl<4;p++){ if(*p==0xFF && p[1]=='c' && p[2]){ p+=2; continue; } if(*p==L'\n'){ ln[nl][k]=0; nl++; k=0; continue; } if(k<78) ln[nl][k++]=*p; }
+  if(nl<4){ ln[nl][k]=0; nl++; }
+  while(nl>1 && !ln[nl-1][0]) nl--;
+  if(nl<=1){ wcsncpy(out,ln[0],cap-1); out[cap-1]=0; return; }
+  /* game names are stored bottom line first: last line = item name, first line = base type */
+  _snwprintf(out,cap-1,L"%s (%s)",ln[nl-1],ln[0]); out[cap-1]=0; (void)i; }
+static void ct_walk(U8* it,int d){ U32 inv,n; int g=0;
+  inv=*(U32*)(it+0x60); if(!inv) return;
+  for(n=((U32(__stdcall*)(U32))0x63B2C0)(inv); n && g<64; n=((U32(__stdcall*)(U32))0x63DFA0)(n),g++){ U8* c=(U8*)((U32(__stdcall*)(U32))0x63DFD0)(n); wchar_t raw[256];
+    if(!c || *(U32*)c!=4) continue;
+    if(d>ctDepth || g_ctn>=ctLines){ g_ctmore++; if(d<=12) ct_walk(c,d+1); continue; }
+    raw[0]=0; ct_name((U32)c,raw,255); raw[255]=0;
+    ct_clean(raw,g_ct[g_ctn].t,80); if(!g_ct[g_ctn].t[0]) wcscpy(g_ct[g_ctn].t,L"(item)");
+    g_ct[g_ctn].d=d; g_ct[g_ctn].col=ct_col(c); g_ct[g_ctn].sock=(int)((U8(__stdcall*)(U8*))0x6299B0)(c);
+    g_ct[g_ctn].fill=*(U32*)(c+0x60)?((int(__stdcall*)(U32))0x63CD60)(*(U32*)(c+0x60)):0; g_ctn++;
+    ct_walk(c,d+1); } }
+static void __stdcall ct_post(void){ U8* it; U8* me; typedef int (__fastcall *TW_t)(const wchar_t*); TW_t tw=(TW_t)0x501820;
+  int i,w,h,lh,x,y,mx,my,sw,sh,rs,rf,tot; wchar_t hd[64], sx[40], more[40];
+  if(!cfgCT) return;
+  __try {
+    me=LOCALPL; it=*(U8**)0x7BCBF4; if(!me || !it || *(U32*)it!=4 || !*(U32*)(it+0x60)) return;
+    /* 2026-10-20 fix (CxMx video): no box while anything is on the cursor. The hovered pointer is not cleared on pickup,
+       so check the hovered item's own mode (4 = on cursor) and the player's cursor slot. */
+    if(*(U32*)(it+0x10)==4 || *(U32*)(it+0x10)==5) return;
+    if(*(U32*)(me+0x60) && ((U32(__stdcall*)(U32))0x63C1E0)(*(U32*)(me+0x60))) return;
+    /* no [0x7BCBE4] live-hover check - only the backpack grid sets it; equipped/merc/stash/cube hovers must show too */
+    if(!((int(__stdcall*)(U32))0x63CD60)(*(U32*)(it+0x60))) return;
+    g_ctn=0; g_ctmore=0; ct_walk(it,1); if(!g_ctn && !g_ctmore) return;
+    SetFont(0); lh=g_mgh?g_mgh:11; lh+=2;
+    rs=(int)((U8(__stdcall*)(U8*))0x6299B0)(it); rf=((int(__stdcall*)(U32))0x63CD60)(*(U32*)(it+0x60)); tot=g_ctn+g_ctmore;
+    if(rs>0) _snwprintf(hd,63,L"Contains (%d/%d sockets, %d item%s):",rf,rs,tot,tot==1?L"":L"s"); else _snwprintf(hd,63,L"Contains (%d item%s):",tot,tot==1?L"":L"s"); hd[63]=0;
+    w=tw(hd);
+    for(i=0;i<g_ctn;i++){ int lw=10*g_ct[i].d+tw(L"- ")+tw(g_ct[i].t); if(g_ct[i].sock>0){ _snwprintf(sx,39,L"  Socketed (%d/%d)",g_ct[i].fill,g_ct[i].sock); sx[39]=0; lw+=tw(sx); } if(lw>w) w=lw; }
+    if(g_ctmore){ _snwprintf(more,39,L"+%d more",g_ctmore); more[39]=0; if(tw(more)+10>w) w=tw(more)+10; }
+    h=lh*(1+g_ctn+(g_ctmore?1:0))+8; w+=12;
+    mx=*(int*)0x7A6AB0; my=*(int*)0x7A6AAC; sw=*(int*)0x71146C; sh=*(int*)0x711470;
+    x=mx+22; y=my+14; if(x+w>sw-4) x=mx-22-w; if(x<4) x=4; if(y+h>sh-4) y=sh-4-h; if(y<4) y=4;
+    for(i=0;i<ctPasses;i++) ((void(__stdcall*)(int,int,int,int,int,int))0x4F6300)(x,y,x+w,y+h,0,1);
+    PrintStr(hd,x+6,y+3+lh-2,4,0);
+    for(i=0;i<g_ctn;i++){ int px=x+6+10*(g_ct[i].d-1), py=y+3+lh*(i+2)-2;
+      PrintStr(L"- ",px,py,5,0); px+=tw(L"- ");
+      PrintStr(g_ct[i].t,px,py,g_ct[i].col,0);
+      if(g_ct[i].sock>0){ px+=tw(g_ct[i].t); _snwprintf(sx,39,L"  Socketed (%d/%d)",g_ct[i].fill,g_ct[i].sock); sx[39]=0; PrintStr(sx,px,py,5,0); } }
+    if(g_ctmore) PrintStr(more,x+6,y+3+lh*(g_ctn+2)-2,5,0);
+    { static U32 last; if(*(U32*)(it+0xC)!=last && g_ctlog<20){ last=*(U32*)(it+0xC); g_ctlog++; logf_("CT: hover item %u: %d lines, %d more, box %dx%d at %d,%d",last,g_ctn,g_ctmore,w,h,x,y); } }
+  } __except(1){ static int nf; if(++nf<=3) logf_("CT: fault while drawing the Contains box (#%d)",nf); }
+}
+/* ---- ND nest diagnostic (2026-10-19, diag build) ----
+   Logs every item that holds socketed items (full tree, ItemData +0x49 filled byte, mode, inventory count) when anything
+   in the item tables changes (insert, equip/unequip, cursor pickup/drop, merc), after each save-list load, and at each
+   save list write (0x5317B0). Also counts socketed (mode 6) items that no tree reaches = orphans (lost items).
+   cxmxdev.ini ND=1/0. Remove after the nesting fix. */
+static int cfgND, g_ndn; static U32 g_ndsig; static U8* g_ndgame; static U8* g_ndtr;
+static void nd_tree(U8* it,int d,int* seen){ U8* dt; U32 inv,n; int cnt=0; char raw[200]; int k,o=0;
+  if(d>10) return; dt=*(U8**)(it+0x14); inv=*(U32*)(it+0x60);
+  if(inv) cnt=((int(__stdcall*)(U32))0x63CD60)(inv);
+  if(dt) for(k=0x40;k<0x78;k+=4) o+=_snprintf(raw+o,sizeof raw-o,"%08X ",*(U32*)(dt+k)); else raw[0]=0;
+  logf_("ND %*s- item %u cls %u mode %u f49 %u inv %08X cnt %d sock %d data40.. %s",d*2,"",*(U32*)(it+0xC),*(U32*)(it+4),*(U32*)(it+0x10),dt?dt[0x49]:255,inv,cnt,
+    (int)((U8(__stdcall*)(U8*))0x6299B0)(it),raw);
+  if(*(U32*)(it+0x10)==6) (*seen)++;
+  if(inv) for(n=NL_FIRST(inv),k=0;n&&k<16;n=NL_NEXT(n),k++){ U8* u=(U8*)NL_UNIT(n); if(u) nd_tree(u,d+1,seen); } }
+static void nd_dump(U8* g,const char* why){ int t,b,n,seen=0,s6=0,roots=0; U8* it;
+  if(!cfgND||!g) return; if(++g_ndn>400){ if(g_ndn==401) logf_("ND: 400 dumps, stopping"); return; }
+  logf_("ND ==== %s (frame %u)",why,*(U32*)(g+0xA8));
+  __try { for(t=0;t<2;t++) for(b=0;b<128;b++) for(it=*(U8**)(g+(t?0x1920:0x1720)+b*4),n=0; it&&n<256; it=*(U8**)(it+0xE4),n++){
+      U32 inv; if(*(U32*)it!=4) continue; if(*(U32*)(it+0x10)==6){ s6++; continue; }
+      inv=*(U32*)(it+0x60); if(!inv||!((int(__stdcall*)(U32))0x63CD60)(inv)) continue;
+      roots++; nd_tree(it,0,&seen); }
+    logf_("ND ==== end %s: %d roots, %d socketed items in tables, %d reached by trees, %d ORPHANS",why,roots,s6,seen,s6-seen);
+  } __except(1){ logf_("ND dump fault"); } }
+static void __stdcall nd_tick(U8* g){ int t,b,n; U8* it; U32 h=2166136261u;
+  if(!cfgND||!g) return;
+  __try { for(t=0;t<2;t++) for(b=0;b<128;b++) for(it=*(U8**)(g+(t?0x1920:0x1720)+b*4),n=0; it&&n<256; it=*(U8**)(it+0xE4),n++){
+      U8* dt; U32 inv; if(*(U32*)it!=4) continue; inv=*(U32*)(it+0x60); dt=*(U8**)(it+0x14);
+      if(!inv && *(U32*)(it+0x10)!=6) continue;
+      h=(h^*(U32*)(it+0xC))*16777619u; h=(h^*(U32*)(it+0x10))*16777619u; h=(h^(dt?dt[0x49]:0))*16777619u;
+      if(inv){ U32 nn=NL_FIRST(inv); int c=0; for(;nn&&c<16;nn=NL_NEXT(nn),c++){ U8* u=(U8*)NL_UNIT(nn); h=(h^(u?*(U32*)(u+0xC):0))*16777619u; } } }
+  } __except(1){ return; }
+  if(g!=g_ndgame){ g_ndgame=g; g_ndsig=h; nd_dump(g,"game start"); return; }
+  if(h!=g_ndsig){ g_ndsig=h; nd_dump(g,"change (insert / equip / unequip / cursor / merc)"); } }
+static void __stdcall nd_save(U32 inv){ U32 n; int k=0,seen=0;
+  if(!cfgND||!inv) return; if(++g_ndn>400) return;
+  __try { logf_("ND ==== save list write (inventory %08X)",inv);
+    for(n=NL_FIRST(inv);n&&k<512;n=NL_NEXT(n),k++){ U8* u=(U8*)NL_UNIT(n); U32 ci;
+      if(!u) continue; ci=*(U32*)(u+0x60); if(ci && ((int(__stdcall*)(U32))0x63CD60)(ci)) nd_tree(u,0,&seen); }
+    logf_("ND ==== save list end: %d items in list",k);
+  } __except(1){ logf_("ND save dump fault"); } }
+__declspec(naked) static void nd_save_stub(void){ __asm {
+  pushad
+  push dword ptr [esp+0x24]
+  call nd_save
+  popad
+  jmp dword ptr [g_ndtr] } }
+static void nd_install(void){ static const U8 sb[]={0x55,0x8B,0xEC,0xB8,0x34,0x20,0x00,0x00};
+  cfgND=GetPrivateProfileIntA("features","ND",0,g_ini)!=0; /* release: diag off unless ND=1 */
+  if(!cfgND){ logf_("ND nest diagnostic: OFF"); return; }
+  if(bytes_eq(0x5317B0,sb,8) && (g_ndtr=(U8*)VirtualAlloc(0,16,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE))){ U32 rel;
+    memcpy(g_ndtr,sb,8); g_ndtr[8]=0xE9; rel=0x5317B8-((U32)g_ndtr+13); memcpy(g_ndtr+9,&rel,4);
+    if(write_jmp(0x5317B0,(void*)nd_save_stub)){ U8 nop[3]={0x90,0x90,0x90}; write_mem(0x5317B5,nop,3); } }
+  logf_("ND nest diagnostic: ON (tick on change, load, save hook %s)",g_ndtr?"0x5317B0":"MISSING"); }
 /* DllMain (PlugY DllToLoad2): hook only the draw call 0x44CB22 (same as the old load-time install,
    page permission restored as found). Everything else installs on the main thread from draw_hook. */
 /* Crash capture: vectored handler (first in line, so it sees the fault before D2's handler/Halt
@@ -2178,6 +2829,8 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD r, LPVOID x){
     _snprintf(g_ini,MAX_PATH,"%scxmxdev.ini",g_dir); g_ini[MAX_PATH-1]=0;
     InitializeCriticalSection(&g_mcs);
     open_log();
+    logf_("---- cxmxdev DllMain pid %lu",GetCurrentProcessId());
+    nest_install(); /* early: the recursive item reader must be in place before the first save loads (the draw-hook install only runs on the first in-game frame) */
     AddVectoredExceptionHandler(1,crash_veh); g_prevuef=SetUnhandledExceptionFilter(crash_uef);
     if(bytes_eq(0x44CB22,fc,5)){ U8 c[5]; U32 rel=(U32)draw_hook-(0x44CB22+5); c[0]=0xE8; memcpy(c+1,&rel,4);
       if(!write_mem(0x44CB22,c,5)){ g_done=1; logf_("draw hook 0x44CB22: write failed, nothing installed"); } }
