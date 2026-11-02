@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-02: tooling only – Ghidra notes for 1.14d; no game, DLL or data changes.
 ## 2026-10-20
 
 - **Find Item and Find Potion for every class.** Every character, Barbarians included, gets Barbarian Find Potion and Find Item at base level 20 on every game join (below 20 or missing goes to 20, above 20 is kept). Both cost 0 mana, and Find Item needs level 1. In LAN games the host must run this DLL.
